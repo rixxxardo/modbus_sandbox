@@ -13,7 +13,8 @@
 #define DEFAULT_BAUD       19200
 #define BROADCAST_ADDRESS  0x00
 #define SIGNOW_SET_ADDRESS 0x03
-#define SEND_PACKET_LENGTH 8
+#define REQ_PKT_LENGTH 8
+#define RSP_PKT_LENGTH 7
 
 // Board specific parameters
 #define TX_PIN 17
@@ -26,25 +27,21 @@ void create_MODBUS_request(
   byte modbus_command,
   byte address_high,
   byte address_low,
-  byte length_high,
-  byte length_low);
+  byte rw_high,
+  byte rw_low);
 void send_MODBUS_request(byte* frame, byte length);   // implemented
 bool read_MODBUS_response(byte* frame, byte length);  // implemented
 bool verify_CRC(byte* frame, byte length);            // implemented
 uint16_t calculate_CRC(byte* frame, byte length);     // implemented
+uint8_t find_device_address(uint8_t address_address);
 
-uint8_t get_device_address();
+void flush_serial_input(HardwareSerial* device);
 
 // Globals
-HardwareSerial NP785(2);
-
-/*
-  Learn about binary math, shifting, XOR, AND, OR
-  Register addresses and storing data
-*/
+HardwareSerial NP785(1);
 
 /* 
-  - Write Request Packet format 
+  - Master Write Request Packet format 
   Byte IDX | Name
      0     | Slave Address
      1     | Function code
@@ -58,7 +55,7 @@ HardwareSerial NP785(2);
 
      7 6 5 4 3 2 1 
 
-  - Read Request Packet format 
+  - Master Read Request Packet format 
   Byte IDX | Name
      0     | Slave Address
      1     | Function code
@@ -69,7 +66,7 @@ HardwareSerial NP785(2);
      6     | CRC  Lo
      7     | CRC  Hi
 
-  - Response Packet format
+  - Slave Response Packet format
   Byte IDX | Name
      0     | Slave Address
      1     | Function code
@@ -110,6 +107,7 @@ void loop() {
   ); // CRC Appended automatically
 
   Serial.println("Sending!");
+  flush_serial_input(&NP785);
   send_MODBUS_request(request_frame, rfl);
   delay(250);
 
@@ -145,14 +143,14 @@ void create_MODBUS_request(
   byte modbus_command,
   byte address_high,
   byte address_low,
-  byte length_high,
-  byte length_low){
+  byte rw_high, // For a read request, register address, for a write request, Data
+  byte rw_low){
     frame[0] = device_address;
     frame[1] = modbus_command;
     frame[2] = address_high;
     frame[3] = address_low;
-    frame[4] = length_high;
-    frame[5] = length_low;
+    frame[4] = rw_high;
+    frame[5] = rw_low;
 
     uint16_t crc = calculate_CRC(frame, 6);
     frame[6] = crc & 0xFF;          // CRC Lo
@@ -208,6 +206,38 @@ bool verify_CRC(byte* frame, byte length){
   return received_CRC == calculate_CRC(frame, length-2);
 }
 
-uint8_t read_device_address(byte* frame, byte length){
-  
+void flush_serial_input(HardwareSerial* device){
+  while(device->available()){
+    device->read();
+  }
+}
+
+uint8_t find_device_address(HardwareSerial* device, uint8_t address_address){
+  byte request_frame[REQ_PKT_LENGTH];
+  byte response_frame[RSP_PKT_LENGTH];
+
+  for(uint8_t address_guess = 1; address_guess < 255; address_guess++){
+    Serial.printf("Testing address: 0x%x\n", address_guess);
+
+    create_MODBUS_request(
+      request_frame,
+      address_guess,
+      READ_HOLDING_REGISTER,
+      0x00,            // address hi
+      address_address, // address lo
+      0x00,            // number of register to read hi
+      0x01             // number of register to read lo
+    );
+
+    flush_serial_input(device);
+    send_MODBUS_request(request_frame, REQ_PKT_LENGTH);
+    read_MODBUS_response(response_frame, RSP_PKT_LENGTH);
+    verify_CRC(response_frame, RSP_PKT_LENGTH)? Serial.println("[CRC] VALID") : Serial.println("[CRC] FAIL");
+
+
+
+  }
+
+
+  return 0;
 }
