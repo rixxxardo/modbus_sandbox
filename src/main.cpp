@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <HardwareSerial.h>
 
+#define DEBUG true
+
 // Modbus commands
 #define READ_HOLDING_REGISTER   (byte) 0x03
 #define WRITE_SINGLE_COIL       (byte) 0x05
@@ -8,8 +10,8 @@
 #define WRITE_MULTIPLE_REGISTER (byte) 0x10
 
 // NP785-05 parameters
-#define REQUEST_TIMEOUT    1500 // time in ms
-#define RESPONSE_TIMEOUT   1500 // time in ms
+#define REQUEST_TIMEOUT    100 // time in ms
+#define RESPONSE_TIMEOUT   100 // time in ms
 #define DEFAULT_BAUD       19200
 #define BROADCAST_ADDRESS  0x00
 #define SIGNOW_SET_ADDRESS 0x03
@@ -21,7 +23,7 @@
 #define RX_PIN 18
 
 // Function declarations
-void create_MODBUS_request(
+void create_modbus_request(
   byte* frame,
   byte device_address,
   byte modbus_command,
@@ -29,11 +31,13 @@ void create_MODBUS_request(
   byte address_low,
   byte rw_high,
   byte rw_low);
-void send_MODBUS_request(byte* frame, byte length);   // implemented
-bool read_MODBUS_response(byte* frame, byte length);  // implemented
+void send_modbus_request(byte* frame, byte length);   // implemented
+bool _send_modbus_request(byte* payload, byte* recv_payload, uint8_t pl_sz, uint8_t recvpl_sz);
+bool read_modbus_response(byte* frame, byte length);  // implemented
 bool verify_CRC(byte* frame, byte length);            // implemented
+
 uint16_t calculate_CRC(byte* frame, byte length);     // implemented
-uint8_t find_device_address(uint8_t address_address);
+uint8_t find_device_address(HardwareSerial* device, uint8_t address_address);
 
 void flush_serial_input(HardwareSerial* device);
 
@@ -89,55 +93,10 @@ void setup(){
 
 void loop() {
   // put your main code here, to run repeatedly:
-  Serial.println("At the top!");
-  uint8_t rfl = 8;  // request frame length
-  uint8_t rpfl = 7; // response frame length
-
-  byte request_frame[rfl];
-  byte response_frame[rpfl];
-
-  create_MODBUS_request(
-    request_frame,
-    SIGNOW_SET_ADDRESS,
-    READ_HOLDING_REGISTER,
-    (139 & 0xFF00), // Hi
-    (139 & 0x00FF), // Lo
-    0x00,
-    0x01
-  ); // CRC Appended automatically
-
-  Serial.println("Sending!");
-  flush_serial_input(&NP785);
-  send_MODBUS_request(request_frame, rfl);
-  delay(250);
-
-  Serial.println("Receiving!");
-  read_MODBUS_response(response_frame, rpfl);
-
-  if(verify_CRC(response_frame, rpfl)){
-    Serial.println("[CRC] pass");
-  } else{
-    Serial.println("[CRC] fail");
-  }
-
-  Serial.printf("Request frame buffer = 0x ");
-  
-  for(int i = rfl-1; i >= 0; i--){
-    Serial.printf("%x ",request_frame[i]);
-  } Serial.println();
-
-  Serial.printf("Response frame buffer = 0x ");
-  
-  for(int i = rpfl-1; i >= 0; i--){
-    Serial.printf("%x ",response_frame[i]);
-  } Serial.println();
-
-
-  Serial.printf("Device address: %x\n", (uint8_t) (response_frame[3]<<8 | response_frame[4]));
-  delay(1500);
+  find_device_address(&NP785, 139);
 }
 
-void create_MODBUS_request(
+void create_modbus_request(
   byte* frame,
   byte device_address,
   byte modbus_command,
@@ -157,13 +116,13 @@ void create_MODBUS_request(
     frame[7] = (crc >> 8) & 0xFF;   // CRC Hi
   }
 
-void send_MODBUS_request(byte* frame, byte length){
+void send_modbus_request(byte* frame, byte length){
   for(uint8_t i = 0; i < length; i++){
     NP785.write(frame[i]);
   }
 }
 
-bool read_MODBUS_response(byte* frame, byte length){
+bool read_modbus_response(byte* frame, byte length){
   uint8_t bytes_read = 0;
   unsigned long start_time = millis();
 
@@ -175,10 +134,12 @@ bool read_MODBUS_response(byte* frame, byte length){
   }
 
   if(bytes_read == length){
-    Serial.printf("Read %d bytes\n", bytes_read);
+    if(DEBUG)
+      Serial.printf("Read %d bytes\n", bytes_read);
     return true;
   } else{
-    Serial.printf("Response timeout %d ms, Bytes read %d out of %d.\n", RESPONSE_TIMEOUT, bytes_read, length);
+    if(DEBUG)
+      Serial.printf("Response timeout %d ms, Bytes read %d out of %d.\n", RESPONSE_TIMEOUT, bytes_read, length);
     return false;
   }
 }
@@ -202,6 +163,7 @@ uint16_t calculate_CRC(byte* frame, byte length){
 }
 
 bool verify_CRC(byte* frame, byte length){
+  // Does not verify the request CRC is a valid CRC for the response packet
   uint16_t received_CRC = (frame[length-1] << 8) | (frame[length-2]); // CRC Hi and CRC Lo respectively (See packet format)
   return received_CRC == calculate_CRC(frame, length-2);
 }
@@ -212,16 +174,21 @@ void flush_serial_input(HardwareSerial* device){
   }
 }
 
+bool _send_modbus_request(byte* payload, byte* recv_payload, uint8_t pl_sz, uint8_t recvpl_sz){
+  send_modbus_request(payload, pl_sz);
+  return read_modbus_response(recv_payload, recvpl_sz);
+}
+
 uint8_t find_device_address(HardwareSerial* device, uint8_t address_address){
   byte request_frame[REQ_PKT_LENGTH];
   byte response_frame[RSP_PKT_LENGTH];
+  
+  Serial.println("Begin looking for address:");
+  for(uint8_t x = 1; x < 255; x++){
 
-  for(uint8_t address_guess = 1; address_guess < 255; address_guess++){
-    Serial.printf("Testing address: 0x%x\n", address_guess);
-
-    create_MODBUS_request(
+    create_modbus_request(
       request_frame,
-      address_guess,
+      x,
       READ_HOLDING_REGISTER,
       0x00,            // address hi
       address_address, // address lo
@@ -230,14 +197,19 @@ uint8_t find_device_address(HardwareSerial* device, uint8_t address_address){
     );
 
     flush_serial_input(device);
-    send_MODBUS_request(request_frame, REQ_PKT_LENGTH);
-    read_MODBUS_response(response_frame, RSP_PKT_LENGTH);
-    verify_CRC(response_frame, RSP_PKT_LENGTH)? Serial.println("[CRC] VALID") : Serial.println("[CRC] FAIL");
-
-
-
+    bool rcvd = _send_modbus_request(request_frame, response_frame, REQ_PKT_LENGTH, RSP_PKT_LENGTH);
+    if(!rcvd){
+      Serial.printf("[Timeout] 0x%x\n", x);
+    }else if(verify_CRC(response_frame, RSP_PKT_LENGTH)){
+        Serial.print("[0x] ");
+        for(int i = RSP_PKT_LENGTH-1; i >= 0; i--){
+          Serial.printf("%x ", response_frame[i]);
+        }
+        memset(response_frame, 0, RSP_PKT_LENGTH); // Reset buffer to prevent false positives
+        
+        Serial.println();
+        Serial.printf("ADDRESS FOUND: 0x%x\n", x);
+    }
   }
-
-
   return 0;
 }
