@@ -4,10 +4,10 @@
 #define DEBUG true
 
 // Modbus commands
-#define READ_HOLDING_REGISTER   (byte) 0x03
-#define WRITE_SINGLE_COIL       (byte) 0x05
-#define WRITE_SINGLE_REGISTER   (byte) 0x06
-#define WRITE_MULTIPLE_REGISTER (byte) 0x10
+#define READ_HOLDING_REGISTER   (byte)0x03
+#define WRITE_SINGLE_COIL       (byte)0x05
+#define WRITE_SINGLE_REGISTER   (byte)0x06
+#define WRITE_MULTIPLE_REGISTER (byte)0x10
 
 // NP785-05 parameters
 #define REQUEST_TIMEOUT    100 // time in ms
@@ -18,7 +18,10 @@
 #define REQ_PKT_LENGTH 8
 #define RSP_PKT_LENGTH 7
 
-// Board specific parameters
+// NP785 registers
+#define NP785_ADDRESS_REG (byte)0x8B
+
+// Board specific parameters ESP32-S3
 #define TX_PIN 17
 #define RX_PIN 18
 
@@ -32,15 +35,14 @@ void create_modbus_request(
   byte rw_high,
   byte rw_low);
 void send_modbus_request(byte* frame, byte length);   // implemented
-bool _send_modbus_request(byte* payload, byte* recv_payload, uint8_t pl_sz, uint8_t recvpl_sz);
+bool _send_modbus_request(byte* payload, byte* recv_payload, uint8_t pl_sz, uint8_t recvpl_sz); //implemented
 bool read_modbus_response(byte* frame, byte length);  // implemented
 bool verify_CRC(byte* frame, byte length);            // implemented
-
 uint16_t calculate_CRC(byte* frame, byte length);     // implemented
-uint8_t find_device_address(HardwareSerial* device, uint8_t address_address);
+uint8_t find_device_address(HardwareSerial* device, uint8_t address_address, bool ONE_SHOT);
+uint8_t set_device_address(HardwareSerial* dev, uint8_t address, uint8_t new_address, byte* request, byte* response, byte rq_sz, byte rsp_sz);
 
 void flush_serial_input(HardwareSerial* device);
-
 // Globals
 HardwareSerial NP785(1);
 
@@ -86,14 +88,35 @@ void setup(){
   Serial.begin(115200); // My terminal serial comm port
   NP785.begin(DEFAULT_BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
   delay(2000); // Initialization delay
-
+  
   Serial.println("BEGINNING TRANSMISSION NP785 test module");
   
 }
 
+byte addy = 0x9b;
 void loop() {
   // put your main code here, to run repeatedly:
-  find_device_address(&NP785, 139);
+  byte request_frame[REQ_PKT_LENGTH];
+  byte response_frame[RSP_PKT_LENGTH];
+  
+  for(int i = 0; i < 100; i++){
+    uint8_t new_addy = esp_random()&0xFF;
+    while(new_addy > 0xF7 || new_addy > 0x01 || new_addy == addy){ // Novus NP785 valid address range and assign new address
+      new_addy = esp_random()&0xFF;
+    }
+
+    new_addy = set_device_address(
+      &NP785,
+      addy,
+      new_addy,
+      request_frame,
+      response_frame,
+      REQ_PKT_LENGTH, RSP_PKT_LENGTH);
+      if(new_addy == addy){
+  
+      }
+    }
+
 }
 
 void create_modbus_request(
@@ -149,13 +172,13 @@ uint16_t calculate_CRC(byte* frame, byte length){
   uint16_t FCS = 0xA001;
   
   for(byte i = 0; i < length; i++){
-    CRC ^= frame[i]; // XOR the frame byte with the CRC
+    CRC ^= frame[i];                // XOR the frame byte with the CRC
     for(byte j = 0; j < 8; j++){
-      if(CRC & 0x0001){ // Check if LSB of CRC is 1 (we got a divisor)
-        CRC >>=1;    // Right shift CRC by 1
-        CRC ^= FCS;  // XOR with 'Polynomial' (need to read up on CRC steps)
+      if(CRC & 0x0001){             // Check if LSB of CRC is 1 (we got a divisor)
+        CRC >>=1;                   // Right shift CRC by 1
+        CRC ^= FCS;                 // XOR with 'Polynomial' (need to read up on CRC steps)
       }else{
-        CRC >>=1;    // Right shift CRC by 1
+        CRC >>=1;                   // Right shift CRC by 1
       }
     }
   }
@@ -179,9 +202,29 @@ bool _send_modbus_request(byte* payload, byte* recv_payload, uint8_t pl_sz, uint
   return read_modbus_response(recv_payload, recvpl_sz);
 }
 
-uint8_t find_device_address(HardwareSerial* device, uint8_t address_address){
+uint8_t set_device_address(HardwareSerial* dev, uint8_t address, uint8_t new_address, byte* request, byte* response, byte rq_sz, byte rsp_sz){
+  create_modbus_request(
+    request,
+    address,
+    WRITE_SINGLE_REGISTER,
+    (NP785_ADDRESS_REG)<<8,
+    NP785_ADDRESS_REG,
+    0x00,
+    new_address
+  );
+  flush_serial_input(dev);
+
+  _send_modbus_request(request, response, rq_sz, rsp_sz);
+  if(verify_CRC(response, rsp_sz)){
+    address = new_address;
+  }
+  return address;
+}
+
+uint8_t find_device_address(HardwareSerial* device, uint8_t address_address, bool ONE_SHOT=false){
   byte request_frame[REQ_PKT_LENGTH];
   byte response_frame[RSP_PKT_LENGTH];
+  uint8_t addy = 0x00;
   
   Serial.println("Begin looking for address:");
   for(uint8_t x = 1; x < 255; x++){
@@ -201,15 +244,18 @@ uint8_t find_device_address(HardwareSerial* device, uint8_t address_address){
     if(!rcvd){
       Serial.printf("[Timeout] 0x%x\n", x);
     }else if(verify_CRC(response_frame, RSP_PKT_LENGTH)){
-        Serial.print("[0x] ");
-        for(int i = RSP_PKT_LENGTH-1; i >= 0; i--){
-          Serial.printf("%x ", response_frame[i]);
-        }
-        memset(response_frame, 0, RSP_PKT_LENGTH); // Reset buffer to prevent false positives
-        
-        Serial.println();
-        Serial.printf("ADDRESS FOUND: 0x%x\n", x);
+      addy = x;
+      Serial.print("[0x] ");
+      for(int i = RSP_PKT_LENGTH-1; i >= 0; i--){
+        Serial.printf("%x ", response_frame[i]);
+      }
+      memset(response_frame, 0, RSP_PKT_LENGTH); // Reset buffer to prevent false positives
+      
+      Serial.println();
+      Serial.printf("ADDRESS FOUND: 0x%x\n", x);
+
+      if(ONE_SHOT) break;
     }
   }
-  return 0;
+  return addy;
 }
