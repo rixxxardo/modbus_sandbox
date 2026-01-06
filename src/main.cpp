@@ -192,6 +192,7 @@ bool verify_CRC(byte* frame, byte length){
 }
 
 void flush_serial_input(HardwareSerial* device){
+  // Assume any data present on the line that we did not request is trash data
   while(device->available()){
     device->read();
   }
@@ -217,6 +218,9 @@ uint8_t set_device_address(HardwareSerial* dev, uint8_t address, uint8_t new_add
   _send_modbus_request(request, response, rq_sz, rsp_sz);
   if(verify_CRC(response, rsp_sz)){
     address = new_address;
+    Serial.printf("New address set to: 0x%02x\n", new_address);
+  } else{
+    Serial.printf("Unable to set address. Current address 0x%02x\n", address);
   }
   return address;
 }
